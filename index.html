@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#f8f6ef">
+<title>도장리 사운드워크</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f8f6ef;color:#242820;font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}
+.wrap{max-width:760px;margin:auto;padding:12px}
+.mapbox{position:relative;width:100%;height:min(68vh,560px);min-height:360px;background:#e9ecef;border-radius:12px;overflow:hidden}
+#googleMap{position:absolute;inset:0;width:100%;height:100%;border:0}
+.controls{background:#fffdf8;border:1px solid #e3e0d5;border-radius:14px;padding:16px;margin-top:12px}
+.intro{font-size:13px;color:#62675e;line-height:1.6;margin:0 0 12px}
+.btn{width:100%;border:0;border-radius:10px;padding:14px;background:#617a55;color:white;font-size:16px;font-weight:700}
+.btn:disabled{opacity:.6}.status{font-size:13px;color:#4c5548;margin-top:12px;line-height:1.65}.now{font-size:14px;font-weight:650;margin-top:12px}
+.small{font-size:11px;color:#888;margin-top:10px;line-height:1.55}
+.pill{display:inline-block;background:#eef3e9;color:#3d5836;border-radius:99px;padding:3px 8px;font-size:11px;margin-bottom:8px}
+</style>
+</head>
+<body>
+<main class="wrap">
+ <div class="mapbox">
+  <iframe id="googleMap" title="도장리 사운드워크 현재 위치 지도"
+   src="https://maps.google.com/maps?q=37.653333,126.445000&z=17&output=embed"
+   loading="eager" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
+ </div>
+ <section class="controls">
+  <span class="pill">GPS 현장 테스트 · 1~7번 지점</span>
+  <p class="intro">시작을 누르면 위치 권한을 요청하고 음원 7개를 미리 준비합니다. 지도는 현재 위치를 중심に 갱신됩니다. 각 지점에 도착하면 다음 음원이 자동 재생됩니다.</p>
+  <button class="btn" id="start">사운드워크 시작</button>
+  <div class="status" id="status">시작 버튼을 눌러 주세요.</div>
+  <div class="now" id="now"></div>
+  <div class="small" id="debug">다음 지점 대기 중</div>
+  <div class="small">지도는 API 키 없는 구글 지도 삽입 방식입니다. 현재 좌표를 지도 검색 위치로 갱신해 표시하므로 구글 지도 앱의 파란 위치점과 모양은 다를 수 있습니다. 화면을 켜 둔 상태로 사용해 주세요.</div>
+ </section>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const STORAGE_KEY='dojangri_soundwalk_playback_v1';
+const FADE_MS=2000;
+let config,watchId=null,ctx=null,buffers=[],activeSource=null,activeGain=null;
+let played=new Set(),nextIndex=0,currentIndex=-1,pending=false,insideCount=0;
+let lastMapUpdate=0,lastMapLat=null,lastMapLng=null,lastRetry=0;
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+function setStatus(s){$('status').textContent=s}
+function save(){
+ try{localStorage.setItem(STORAGE_KEY,JSON.stringify({completed:[...played],nextIndex,currentIndex}));}catch(e){}
+}
+function restore(){
+ try{
+  const x=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null');
+  if(x){if(Array.isArray(x.completed))x.completed.forEach(v=>played.add(v));nextIndex=Number.isInteger(x.nextIndex)?x.nextIndex:0;
+   // Reloading an interrupted point restarts that point from the beginning when re-entered.
+   currentIndex=Number.isInteger(x.currentIndex)?x.currentIndex:-1;
+   if(currentIndex>=0)nextIndex=currentIndex;
+  }
+ }catch(e){}
+ while(nextIndex<config.points.length&&played.has(config.points[nextIndex].id))nextIndex++;
+}
+function haversine(a,b,c,d){
+ const R=6371000,rad=x=>x*Math.PI/180,dl=rad(c-a),dn=rad(d-b);
+ const q=Math.sin(dl/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dn/2)**2;
+ return 2*R*Math.atan2(Math.sqrt(q),Math.sqrt(1-q));
+}
+function updateMap(lat,lng){
+ const now=Date.now();
+ if(lastMapLat!==null && haversine(lastMapLat,lastMapLng,lat,lng)<8 && now-lastMapUpdate<12000)return;
+ if(now-lastMapUpdate<5000)return;
+ lastMapLat=lat;lastMapLng=lng;lastMapUpdate=now;
+ // A no-key Maps embed can show a queried coordinate, but cannot expose the live blue-dot layer.
+ $('googleMap').src=`https://maps.google.com/maps?q=${lat.toFixed(6)},${lng.toFixed(6)}&z=18&output=embed`;
+}
+async function loadAudio(){
+ const Ctx=window.AudioContext||window.webkitAudioContext;
+ if(!Ctx)throw new Error('이 브라우저에서 Web Audio를 지원하지 않습니다.');
+ ctx=ctx||new Ctx();
+ await ctx.resume();
+ if(ctx.state!=='running')throw new Error('오디오 재생 권한을 열지 못했습니다. 화면의 시작 버튼을 다시 눌러 주세요.');
+ setStatus('음원 7개를 준비하고 있습니다…');
+ buffers=[];
+ for(let i=0;i<config.points.length;i++){
+  const p=config.points[i];
+  const response=await fetch(p.audio,{cache:'no-store'});
+  if(!response.ok)throw new Error(`${p.name} 음원을 찾을 수 없습니다: ${p.audio} (HTTP ${response.status})`);
+  const bytes=await response.arrayBuffer();
+  try{buffers[i]=await ctx.decodeAudioData(bytes);}catch(e){throw new Error(`${p.name} MP3 디코딩 실패: 파일 형식 또는 파일 손상 여부를 확인해 주세요.`);}
+  setStatus(`음원 준비 중… ${i+1}/7`);
+ }
+}
+async function playPoint(index){
+ if(pending||index<0||index>=buffers.length||played.has(config.points[index].id))return;
+ pending=true;
+ const p=config.points[index];
+ try{
+  if(ctx.state!=='running')await ctx.resume();
+  if(activeSource&&activeGain){
+   const t=ctx.currentTime;
+   activeGain.gain.cancelScheduledValues(t);
+   activeGain.gain.setValueAtTime(activeGain.gain.value,t);
+   activeGain.gain.linearRampToValueAtTime(0,t+FADE_MS/1000);
+   $('now').textContent=`전환 중 · ${p.name}`;
+   await wait(FADE_MS);
+   try{activeSource.stop();}catch(e){}
+   activeSource.disconnect();activeGain.disconnect();
+   activeSource=null;activeGain=null;
+  }
+  const source=ctx.createBufferSource(),gain=ctx.createGain();
+  source.buffer=buffers[index];source.loop=false;gain.gain.setValueAtTime(1,ctx.currentTime);
+  source.connect(gain).connect(ctx.destination);
+  activeSource=source;activeGain=gain;currentIndex=index;
+  source.onended=()=>{
+   if(activeSource!==source)return;
+   activeSource=null;activeGain=null;source.disconnect();gain.disconnect();
+   played.add(p.id);nextIndex=Math.max(nextIndex,index+1);currentIndex=-1;save();
+   $('now').textContent=`재생 완료 · ${p.name}`;
+  };
+  source.start(0);
+  played.add(p.id);nextIndex=index+1;save();
+  $('now').textContent=`재생 중 · ${p.name}`;
+  setStatus('GPS 수신 중 · 다음 지점을 기다립니다.');
+ }catch(e){
+  $('now').textContent=`재생 오류 · ${p.name}`;
+  setStatus(`음원 재생 오류: ${e.message||e}`);
+  save();
+ }finally{pending=false;}
+}
+function checkArrival(lat,lng,accuracy){
+ while(nextIndex<config.points.length&&played.has(config.points[nextIndex].id))nextIndex++;
+ if(nextIndex>=config.points.length){$('debug').textContent='모든 지점의 재생이 끝났습니다.';return;}
+ const p=config.points[nextIndex],d=haversine(lat,lng,p.lat,p.lng),r=p.radius;
+ $('debug').textContent=`다음 지점: ${p.name} · 거리 ${Math.round(d)}m / 반경 ${r}m · GPS 오차 ${Math.round(accuracy)}m`;
+ if(d<=r){
+  insideCount++;
+  if(insideCount>=2&&!pending){insideCount=0;playPoint(nextIndex);}
+ }else if(d>r+5){insideCount=0;}
+}
+function onPosition(pos){
+ const {latitude:lat,longitude:lng,accuracy}=pos.coords;
+ updateMap(lat,lng);checkArrival(lat,lng,accuracy);
+ setStatus(`현재 위치 확인 중 · GPS 오차 약 ${Math.round(accuracy)}m`);
+}
+function onError(e){
+ setStatus(`GPS 오류: ${e.message||'위치 정보를 가져오지 못했습니다.'} 위치 권한과 휴대전화 설정을 확인해 주세요.`);
+ $('start').disabled=false;$('start').textContent='다시 시도';
+}
+async function start(){
+ const b=$('start');b.disabled=true;b.textContent='준비 중…';
+ try{
+  if(!window.isSecureContext)throw new Error('위치 기능은 HTTPS 주소에서 열어야 합니다.');
+  if(!navigator.geolocation)throw new Error('이 브라우저는 GPS를 지원하지 않습니다.');
+  const r=await fetch('config.json',{cache:'no-store'});if(!r.ok)throw new Error('config.json을 읽지 못했습니다.');
+  config=await r.json();
+  if(!Array.isArray(config.points)||config.points.length!==7)throw new Error('config.json에 7개 지점이 필요합니다.');
+  // Restore before audio preparation so already completed points are not replayed.
+  restore();
+  await loadAudio(); // All seven MP3s are fetched and decoded during the user gesture.
+  setStatus('음원 준비 완료 · 위치 권한을 요청합니다.');
+  navigator.geolocation.getCurrentPosition(onPosition,onError,{enableHighAccuracy:true,maximumAge:0,timeout:25000});
+  if(watchId!==null)navigator.geolocation.clearWatch(watchId);
+  watchId=navigator.geolocation.watchPosition(onPosition,onError,{enableHighAccuracy:true,maximumAge:1000,timeout:25000});
+  b.textContent='GPS 수신 중';
+ }catch(e){
+  setStatus(`시작 오류: ${e.message||e}`);
+  b.disabled=false;b.textContent='다시 시도';
+ }
+}
+$('start').addEventListener('click',start);
+window.addEventListener('pagehide',()=>{
+ if(currentIndex>=0){try{localStorage.setItem(STORAGE_KEY,JSON.stringify({completed:[...played].filter(id=>id!==config.points[currentIndex].id),nextIndex:currentIndex,currentIndex}));}catch(e){}}
+});
+</script>
+</body>
+</html>
