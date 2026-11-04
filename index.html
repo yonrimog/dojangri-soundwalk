@@ -34,14 +34,34 @@ body{margin:0;background:#f8f6ef;color:#242820;font-family:-apple-system,BlinkMa
   <button class="btn" id="start">GPS 테스트 시작</button>
   <div class="status" id="status">아직 GPS를 시작하지 않았습니다.</div>
   <div class="now" id="now"></div>
-  <audio id="player" controls preload="none" playsinline style="display:none"></audio>
   <div class="small">휴대전화의 위치 정확도에 따라 점의 위치와 도착 판정에 오차가 생길 수 있습니다. 화면을 켜 둔 상태로 사용해 주세요. iPhone Safari에서 자동 재생이 차단되면 표시되는 재생 버튼을 눌러 주세요.</div>
  </section>
 </main>
 <script>
-let config=null,watchId=null,routeProgress=0,nextPointIndex=0,playing=false;
-const played=new Set(),queue=[];
-const $=id=>document.getElementById(id),player=$('player'),pin=$('pin');
+let config=null,watchId=null,routeProgress=0,nextPointIndex=0;
+const played=new Set();
+const $=id=>document.getElementById(id),pin=$('pin');
+// 두 개의 오디오 데크를 교대로 사용해 이전 음원과 다음 음원을 겹쳐 재생합니다.
+const decks=[new Audio(),new Audio()];
+decks.forEach(a=>{a.preload='auto';a.playsInline=true;});
+let audioContext=null,gainNodes=[],sourceNodes=[];
+let currentDeck=-1,currentPointId=null,fadeTimer=null,transitionToken=0;
+const CROSSFADE_MS=5000; // 페이드 아웃/인 각각 5초 동안 동시에 진행
+function prepareAudio(){
+ const AudioCtx=window.AudioContext||window.webkitAudioContext;
+ if(!AudioCtx)throw Error('이 브라우저는 부드러운 음원 전환을 지원하지 않습니다.');
+ if(!audioContext){
+  audioContext=new AudioCtx();
+  decks.forEach((audio,i)=>{
+   const source=audioContext.createMediaElementSource(audio);
+   const gain=audioContext.createGain();
+   gain.gain.value=0;
+   source.connect(gain).connect(audioContext.destination);
+   sourceNodes[i]=source;gainNodes[i]=gain;
+  });
+ }
+ if(audioContext.state==='suspended')audioContext.resume();
+}
 // 일러스트 지도 위 지점 위치(가로/세로 퍼센트). 1~4번은 사용자 확인 위치,
 // 5~7번은 점선 산책길과 GPS 좌표 순서를 바탕으로 우선 배치한 현장 보정용 근사값입니다.
 const mapAnchors={
@@ -80,23 +100,72 @@ function movePin(lat,lng){const p=routeLocation(lat,lng);if(!p||p.off>100){pin.c
  pin.style.left=p.x+'%';pin.style.top=p.y+'%';pin.classList.add('active');}
 async function load(){const r=await fetch('config.json',{cache:'no-store'});if(!r.ok)throw Error('config.json을 읽지 못했습니다.');config=await r.json();if(!Array.isArray(config.points))throw Error('config.json의 points 목록을 확인해 주세요.');$('map').src=config.mapImage||'map.png';}
 function activePoints(){return config.points.filter(p=>p.enabled&&Number.isFinite(p.lat)&&Number.isFinite(p.lng));}
-function enqueuePoint(point){if(played.has(point.id)||queue.some(x=>x.id===point.id)||(playing&&player.dataset.pointId===point.id))return;played.add(point.id);queue.push(point);playNext();}
-function playNext(){if(playing||!queue.length)return;const point=queue.shift();if(!point.audio){$('now').textContent=`${point.name}: 음원 경로가 비어 있습니다.`;playNext();return;}playing=true;player.dataset.pointId=point.id;$('now').textContent=`재생 중 · ${point.name}`;player.src=point.audio;player.style.display='block';player.load();player.play().catch(()=>{playing=false;$('status').textContent+=` · ${point.name} 자동 재생이 차단되었습니다. 아래 재생 버튼을 눌러 주세요.`;$('now').textContent=`재생 대기 · ${point.name}`;queue.unshift(point);});}
-player.addEventListener('ended',()=>{playing=false;$('now').textContent='음원 재생 완료';playNext();});
-player.addEventListener('error',()=>{if(player.currentSrc){playing=false;$('status').textContent+=' · 음원 파일을 열 수 없습니다. config.json의 audio 경로와 파일명을 확인해 주세요.';$('now').textContent='음원 파일 오류';}});
+function stopDeck(index){
+ const a=decks[index];a.pause();a.removeAttribute('src');a.load();if(gainNodes[index]&&audioContext)gainNodes[index].gain.setValueAtTime(0,audioContext.currentTime);
+}
+function crossfadeTo(point){
+ if(!point.audio){$('now').textContent=`${point.name}: 음원 경로가 비어 있습니다.`;return;}
+ if(currentPointId===point.id)return;
+ const token=++transitionToken;
+ if(fadeTimer){clearInterval(fadeTimer);fadeTimer=null;}
+ // 직전 전환이 아직 진행 중이면 현재 주 음원 외의 잔여 데크는 정리합니다.
+ const oldIndex=currentDeck;
+ const newIndex=oldIndex===0?1:0;
+ if(oldIndex===-1){stopDeck(0);stopDeck(1);}
+ else stopDeck(newIndex);
+ const incoming=decks[newIndex],outgoing=oldIndex>=0?decks[oldIndex]:null;
+ incoming.src=point.audio;
+ if(gainNodes[newIndex])gainNodes[newIndex].gain.setValueAtTime(0,audioContext.currentTime);
+ incoming.load();
+ currentDeck=newIndex;
+ currentPointId=point.id;
+ $('now').textContent=`전환 중 · ${point.name}`;
+ $('status').textContent=$('status').textContent.replace(/ · 음원 전환 중$/, '')+' · 음원 전환 중';
+ incoming.play().then(()=>{
+   if(token!==transitionToken)return;
+   const now=audioContext.currentTime;
+   const inGain=gainNodes[newIndex].gain;
+   inGain.cancelScheduledValues(now);inGain.setValueAtTime(0,now);inGain.linearRampToValueAtTime(1,now+CROSSFADE_MS/1000);
+   if(outgoing){
+    const outGain=gainNodes[oldIndex].gain;
+    const level=outGain.value;
+    outGain.cancelScheduledValues(now);outGain.setValueAtTime(level,now);outGain.linearRampToValueAtTime(0,now+CROSSFADE_MS/1000);
+   }
+   fadeTimer=setTimeout(()=>{
+    if(token!==transitionToken)return;
+    fadeTimer=null;
+    if(outgoing)stopDeck(oldIndex);
+    $('now').textContent=`재생 중 · ${point.name}`;
+   },CROSSFADE_MS+100);
+ }).catch(()=>{
+   if(token!==transitionToken)return;
+   incoming.pause();if(gainNodes[newIndex])gainNodes[newIndex].gain.setValueAtTime(0,audioContext.currentTime);
+   if(outgoing&&gainNodes[oldIndex])gainNodes[oldIndex].gain.setValueAtTime(1,audioContext.currentTime);
+   currentDeck=oldIndex;
+   currentPointId=oldIndex>=0?decks[oldIndex].dataset.pointId||null:null;
+   $('status').textContent+=' · 자동 재생이 차단되었습니다. 화면을 한 번 터치한 뒤 다시 시도해 주세요.';
+   $('now').textContent=`재생 대기 · ${point.name}`;
+ });
+ incoming.dataset.pointId=point.id;
+}
+function activatePoint(point){
+ if(played.has(point.id))return;
+ played.add(point.id);
+ crossfadeTo(point);
+}
 function checkArrival(lat,lng,accuracy){const pts=activePoints();if(!pts.length)return;
  // 지정된 순서대로 다음 지점만 판정합니다. GPS 오차를 고려하되 50m를 넘으면 보류합니다.
  while(nextPointIndex<pts.length&&played.has(pts[nextPointIndex].id))nextPointIndex++;
  if(nextPointIndex>=pts.length||accuracy>50)return;
  const p=pts[nextPointIndex],d=distance(lat,lng,p.lat,p.lng),tol=Math.max(Number(p.radius)||10,Math.min(accuracy,25));
- if(d<=tol){enqueuePoint(p);nextPointIndex++;}
+ if(d<=tol){activatePoint(p);nextPointIndex++;}
 }
 function pos(position){const {latitude,longitude,accuracy}=position.coords;movePin(latitude,longitude);checkArrival(latitude,longitude,accuracy);
  const pts=activePoints();let nearest=null;for(const p of pts){const d=distance(latitude,longitude,p.lat,p.lng);if(!nearest||d<nearest.d)nearest={p,d};}
  $('status').textContent=`GPS 수신 중 · 오차 약 ${Math.round(accuracy)}m`+(nearest?` · 가까운 지점: ${nearest.p.name} ${Math.round(nearest.d)}m`:'');if(accuracy>50)$('status').textContent+=' · GPS 정확도가 낮아 도착 판정을 보류합니다.';
 }
 function err(e){$('status').textContent='GPS 오류: '+e.message+' · 위치 권한과 휴대전화 GPS 설정을 확인해 주세요.';$('start').disabled=false;$('start').textContent='다시 시도';}
-$('start').onclick=async()=>{try{await load();const pts=activePoints();if(!pts.length)throw Error('활성화된 지점의 좌표를 확인해 주세요.');if(!navigator.geolocation)throw Error('이 브라우저는 GPS를 지원하지 않습니다.');$('start').disabled=true;$('start').textContent='GPS 수신 중…';$('status').textContent='위치 권한을 요청하고 있습니다.';navigator.geolocation.getCurrentPosition(pos,err,{enableHighAccuracy:true,maximumAge:0,timeout:25000});if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=navigator.geolocation.watchPosition(pos,err,{enableHighAccuracy:true,maximumAge:1000,timeout:25000});}catch(e){$('status').textContent=e.message;$('start').disabled=false;$('start').textContent='다시 시도';}};
+$('start').onclick=async()=>{try{prepareAudio();await load();const pts=activePoints();if(!pts.length)throw Error('활성화된 지점의 좌표를 확인해 주세요.');if(!navigator.geolocation)throw Error('이 브라우저는 GPS를 지원하지 않습니다.');$('start').disabled=true;$('start').textContent='GPS 수신 중…';$('status').textContent='위치 권한을 요청하고 있습니다.';navigator.geolocation.getCurrentPosition(pos,err,{enableHighAccuracy:true,maximumAge:0,timeout:25000});if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=navigator.geolocation.watchPosition(pos,err,{enableHighAccuracy:true,maximumAge:1000,timeout:25000});}catch(e){$('status').textContent=e.message;$('start').disabled=false;$('start').textContent='다시 시도';}};
 </script>
 </body>
 </html>
