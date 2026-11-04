@@ -8,7 +8,7 @@
       "audio": "audio/01-start.m4a",
       "lat": 37.653333,
       "lng": 126.445,
-      "radius": 15,
+      "radius": 20,
       "enabled": true
     },
     {
@@ -18,7 +18,7 @@
       "lat": null,
       "lng": null,
       "radius": 20,
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "p3",
@@ -26,8 +26,8 @@
       "audio": "audio/03-earth-house.m4a",
       "lat": null,
       "lng": null,
-      "radius": 10,
-      "enabled": false
+      "radius": 20,
+      "enabled": true
     },
     {
       "id": "p4",
@@ -36,7 +36,7 @@
       "lat": null,
       "lng": null,
       "radius": 20,
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "p5",
@@ -45,7 +45,7 @@
       "lat": null,
       "lng": null,
       "radius": 20,
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "p6",
@@ -54,7 +54,7 @@
       "lat": null,
       "lng": null,
       "radius": 20,
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "p7",
