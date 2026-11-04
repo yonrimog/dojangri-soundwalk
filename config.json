@@ -1,0 +1,78 @@
+{
+  "title": "강화도 양도면 사운드워크",
+  "mapImage": "map.png",
+  "points": [
+    {
+      "id": "p1",
+      "name": "출발",
+      "audio": "audio/slot-1.mp3",
+      "lat": 37.653333,
+      "lng": 126.445,
+      "radius": 20,
+      "enabled": true
+    },
+    {
+      "id": "p2",
+      "name": "죽은 나무",
+      "audio": "audio/slot-2.mp3",
+      "lat": 37.653056,
+      "lng": 126.446111,
+      "radius": 10,
+      "enabled": true
+    },
+    {
+      "id": "p3",
+      "name": "흙집",
+      "audio": "audio/slot-3.mp3",
+      "lat": 37.653333,
+      "lng": 126.446944,
+      "radius": 5,
+      "enabled": true
+    },
+    {
+      "id": "p4",
+      "name": "흙집 다음 좌회전",
+      "audio": "audio/slot-4.mp3",
+      "lat": 37.653056,
+      "lng": 126.447222,
+      "radius": 5,
+      "enabled": true
+    },
+    {
+      "id": "p5",
+      "name": "사거리 좌회전",
+      "audio": "audio/slot-5.mp3",
+      "lat": 37.654444,
+      "lng": 126.446667,
+      "radius": 10,
+      "enabled": true
+    },
+    {
+      "id": "p6",
+      "name": "남천 사거리",
+      "audio": "audio/slot-6.mp3",
+      "lat": 37.654167,
+      "lng": 126.443333,
+      "radius": 10,
+      "enabled": true
+    },
+    {
+      "id": "p7",
+      "name": "마지막 사거리",
+      "audio": "audio/slot-7.mp3",
+      "lat": 37.653056,
+      "lng": 126.443333,
+      "radius": 10,
+      "enabled": true
+    },
+    {
+      "id": "p8",
+      "name": "새 음원 8",
+      "audio": "",
+      "lat": null,
+      "lng": null,
+      "radius": 20,
+      "enabled": false
+    }
+  ]
+}
