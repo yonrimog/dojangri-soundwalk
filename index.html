@@ -76,21 +76,57 @@ async function prepareAudio(){
  }
  if(audioContext.state==='suspended')await audioContext.resume();
 }
-const mapAnchors={
- p1:{x:49.5,y:70.7},p2:{x:73.5,y:58.3},p3:{x:86.0,y:77.0},p4:{x:87.5,y:68.8},
- p5:{x:79.0,y:37.5},p6:{x:14.0,y:45.0},p7:{x:12.0,y:77.0}
+// 그림 지도 위 실제 GPS 좌표의 기준점. 사용자가 표시한 빨간 원이 p1입니다.
+// 각 좌표 사이의 점선 굴곡을 따라 파란 점을 보간합니다.
+const routeShapes={
+ p1_p2:[[53.5,68.5],[58.5,69.8],[63.0,70.5]],
+ p2_p3:[[63.0,70.5],[68.0,70.5],[70.0,67.5],[70.5,63.7]],
+ p3_p4:[[70.5,63.7],[77.0,63.8],[83.5,66.0]],
+ p4_p5:[[83.5,66.0],[82.5,58.0],[82.0,48.0],[83.0,39.5]],
+ p5_p6:[[83.0,39.5],[65.0,41.5],[43.0,44.5],[16.0,47.2]],
+ p6_p7:[[16.0,47.2],[12.8,55.0],[15.0,63.0],[15.5,68.5]],
+ p7_p1:[[15.5,68.5],[25.0,66.5],[29.0,62.0],[36.0,61.5],[43.0,66.0],[48.0,68.2],[53.5,68.5]]
 };
+function interpolateShape(shape,t){
+ const lengths=[0];let total=0;
+ for(let i=1;i<shape.length;i++){total+=Math.hypot(shape[i][0]-shape[i-1][0],shape[i][1]-shape[i-1][1]);lengths.push(total);}
+ const target=Math.max(0,Math.min(1,t))*total;
+ for(let i=1;i<shape.length;i++)if(target<=lengths[i]){const span=lengths[i]-lengths[i-1]||1,u=(target-lengths[i-1])/span;return{x:shape[i-1][0]+(shape[i][0]-shape[i-1][0])*u,y:shape[i-1][1]+(shape[i][1]-shape[i-1][1])*u};}
+ return{x:shape.at(-1)[0],y:shape.at(-1)[1]};
+}
 function distance(a,b,c,d){const R=6371000,to=x=>x*Math.PI/180,dl=to(c-a),dn=to(d-b),x=Math.sin(dl/2)**2+Math.cos(to(a))*Math.cos(to(c))*Math.sin(dn/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function project(lat,lng,refLat){const k=Math.cos(refLat*Math.PI/180);return {x:lng*k*111320,y:lat*110540}}
 function routeLocation(lat,lng){
- const pts=config.points.filter(p=>mapAnchors[p.id]&&Number.isFinite(p.lat)&&Number.isFinite(p.lng));if(pts.length<2)return null;
- const refLat=pts.reduce((s,p)=>s+p.lat,0)/pts.length,here=project(lat,lng,refLat);let best=null;
- for(let i=0;i<pts.length-1;i++){const a=project(pts[i].lat,pts[i].lng,refLat),b=project(pts[i+1].lat,pts[i+1].lng,refLat),vx=b.x-a.x,vy=b.y-a.y,den=vx*vx+vy*vy||1,t=Math.max(0,Math.min(1,((here.x-a.x)*vx+(here.y-a.y)*vy)/den)),px=a.x+t*vx,py=a.y+t*vy,off=Math.hypot(here.x-px,here.y-py),progress=i+t;if(!best||off<best.off)best={off,progress};}
- if(best&&best.off<100)routeProgress=Math.max(routeProgress,best.progress);
- const seg=Math.min(pts.length-2,Math.floor(routeProgress)),t=Math.max(0,Math.min(1,routeProgress-seg)),a=mapAnchors[pts[seg].id],b=mapAnchors[pts[seg+1].id];
- if(!a||!b)return null;return {x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,off:best?best.off:Infinity};
+ const pts=activePoints();if(pts.length<2)return null;
+ const ordered=[...pts];
+ const refLat=ordered.reduce((s,p)=>s+p.lat,0)/ordered.length;
+ const here=project(lat,lng,refLat);
+ let best=null,nearest=null;
+ // GPS 경로의 각 구간에 현재 좌표를 투영합니다. 이미 지나온 구간으로 되돌아가지 않도록 진행률을 유지합니다.
+ for(let i=0;i<ordered.length;i++){
+  const a=ordered[i],b=ordered[(i+1)%ordered.length];
+  const ga=project(a.lat,a.lng,refLat),gb=project(b.lat,b.lng,refLat);
+  const vx=gb.x-ga.x,vy=gb.y-ga.y,den=vx*vx+vy*vy||1;
+  const t=Math.max(0,Math.min(1,((here.x-ga.x)*vx+(here.y-ga.y)*vy)/den));
+  const off=Math.hypot(here.x-(ga.x+t*vx),here.y-(ga.y+t*vy));
+  const candidate={off,index:i,t,progress:i+t};
+  if(!nearest||off<nearest.off)nearest=candidate;
+  if(candidate.progress>=routeProgress-0.25&&(!best||off<best.off))best=candidate;
+ }
+ best=best||nearest;if(!best)return null;
+ if(best.off>45)return {off:best.off};
+ routeProgress=Math.max(routeProgress,best.progress);
+ const a=ordered[best.index],b=ordered[(best.index+1)%ordered.length];
+ const key=a.id+'_'+b.id,shape=routeShapes[key];
+ if(!shape)return {off:best.off};
+ const loc=interpolateShape(shape,best.t);
+ return{x:loc.x,y:loc.y,off:best.off};
 }
-function movePin(lat,lng){const p=routeLocation(lat,lng);if(!p||p.off>100){pin.classList.remove('active');return;}pin.style.left=p.x+'%';pin.style.top=p.y+'%';pin.classList.add('active');}
+function movePin(lat,lng){
+ const p=routeLocation(lat,lng);
+ if(!p||!Number.isFinite(p.x)||p.off>45){pin.classList.remove('active');return;}
+ pin.style.left=p.x+'%';pin.style.top=p.y+'%';pin.classList.add('active');
+}
 async function load(){
  const r=await fetch('config.json',{cache:'no-store'});if(!r.ok)throw Error('config.json을 읽지 못했습니다.');config=await r.json();if(!Array.isArray(config.points))throw Error('config.json의 points 목록을 확인해 주세요.');
  $('map').src=config.mapImage||'map.png';restorePlaybackState();
