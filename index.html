@@ -10,7 +10,7 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;background:#f8f6ef;color:#242820}
 #map{height:100%;width:100%;background:#e8e8e8}
-#panel{position:fixed;z-index:1000;left:10px;right:10px;top:max(10px,env(safe-area-inset-top));background:rgba(255,253,248,.96);backdrop-filter:blur(10px);border:1px solid #dedbd1;border-radius:14px;padding:13px 14px;box-shadow:0 3px 18px #0002;max-height:48vh;overflow:auto}
+#panel{position:fixed;z-index:1000;left:10px;right:10px;bottom:max(10px,env(safe-area-inset-bottom));top:auto;background:rgba(255,253,248,.96);backdrop-filter:blur(10px);border:1px solid #dedbd1;border-radius:14px;padding:13px 14px;box-shadow:0 3px 18px #0002;max-height:48vh;overflow:auto}
 #title{font-size:16px;font-weight:750;margin-bottom:5px}
 #status{font-size:13px;line-height:1.5;color:#394438}
 #gps,#next{font-size:12px;color:#62675e;margin-top:4px;line-height:1.45}
@@ -74,19 +74,21 @@ async function fadeOut(ms){
  });
 }
 async function playPoint(i){
- if(transitioning||i!==nextIndex||i>=points.length)return;
+ if(transitioning||i!==nextIndex||i>=points.length||playingIndex===i)return;
  transitioning=true;const p=points[i];
+ // Lock this point immediately, before awaiting play(), so duplicate GPS callbacks cannot restart it.
+ playingIndex=i;
  try{
   if(!audioUnlocked)throw new Error('오디오가 잠겨 있습니다. 시작 버튼을 다시 눌러 주세요.');
   if(!audio.paused)await fadeOut(2000);
   audio.pause();audio.volume=1;audio.src=p.audio;audio.load();
   await audio.play();
-  playingIndex=i;setStatus(`${i+1}번 지점 도착 · ${p.name} 재생 중`);
+  setStatus(`${i+1}번 지점 도착 · ${p.name} 재생 중`);
   $('current').textContent=`재생 중 · ${i+1}번 ${p.name}`;
  }catch(e){
   setStatus(`${i+1}번 음원 재생 실패: ${e.message||e}`);
   $('current').textContent=`재생 실패 · ${p.name} — 재생바의 ▶ 버튼을 눌러 다시 시도해 주세요.`;
-  transitioning=false;return;
+  playingIndex=-1;transitioning=false;return;
  }
  transitioning=false;
 }
@@ -119,7 +121,7 @@ function updateLocation(lat,lng,accuracy){
  $('center').disabled=false;
 }
 function checkTriggers(lat,lng,accuracy){
- if(transitioning||nextIndex>=points.length)return;
+ if(transitioning||playingIndex===nextIndex||nextIndex>=points.length)return;
  const p=points[nextIndex],d=haversine(lat,lng,p.lat,p.lng);
  $('next').textContent=`다음 지점: ${nextIndex+1}번 ${p.name} · 거리 ${Math.round(d)}m / 반경 ${p.radius}m · GPS 오차 ±${Math.round(accuracy)}m`;
  // Keep the configured trigger radius exact. Do not silently enlarge it by reported GPS accuracy.
